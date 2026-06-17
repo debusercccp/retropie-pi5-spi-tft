@@ -1,0 +1,24 @@
+# Claude Code
+.claude/
+CLAUDE.md
+claude.md
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*~
+*.swp
+.idea/
+.vscode/
+
+# Log e temporanei
+*.log
+*.tmp
+*.bak
+
+# Eventuali ROM o file di gioco (da non versionare)
+roms/
+*.zip
+*.7z
+*.img
+*.iso
