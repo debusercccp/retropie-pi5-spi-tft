@@ -4,17 +4,20 @@ Manuale tecnico di installazione e troubleshooting per far girare **RetroPie / E
 su un **Raspberry Pi 5** con sistema operativo basato su **Debian Trixie** (kernel 6.x),
 usando un **display TFT SPI da 3.5"** (controller `tft35a`) collegato via GPIO.
 
+La configurazione finale è **auto-commutante**: all'accensione il Pi rileva se c'è un cavo HDMI
+e manda EmulationStation sulla **TV** (se collegata) oppure sul **TFT SPI** (se assente).
+
 ---
 
 ## Indice
 
 - [Il problema architetturale](#il-problema-architetturale)
 - [Requisiti](#requisiti)
-- [Installazione: il "Ponte X11"](#installazione-il-ponte-x11)
+- [Installazione: il "Ponte X11" con auto-switch](#installazione-il-ponte-x11-con-auto-switch)
   - [1. Pacchetti X11 e legacy](#1-pacchetti-x11-e-legacy)
-  - [2. Permessi e routing sul framebuffer](#2-permessi-e-routing-sul-framebuffer)
+  - [2. Permessi X e file di configurazione del TFT](#2-permessi-x-e-file-di-configurazione-del-tft)
   - [3. Disabilitazione Display Manager e boot testuale](#3-disabilitazione-display-manager-e-boot-testuale)
-  - [4. Autostart (il "grilletto")](#4-autostart-il-grilletto)
+  - [4. Autostart con auto-switch TV/TFT](#4-autostart-con-auto-switch-tvtft)
 - [Configurazione hardware: bus SPI (`tft35a`)](#configurazione-hardware-bus-spi-tft35a)
 - [Utilizzo: ROM e controlli](#utilizzo-rom-e-controlli)
 - [Aprire un terminale sullo schermino](#aprire-un-terminale-sullo-schermino)
@@ -29,15 +32,32 @@ Sui Raspberry Pi 5 con Debian Trixie (kernel 6.x), il driver grafico moderno
 
 Conseguenze:
 
-- I display **SPI** (collegati via GPIO, es. TFT 3.5" con driver `tft35a`) **non vengono rilevati**
-  dal sistema DRM.
+- Le uscite **HDMI** funzionano nativamente: EmulationStation gira senza problemi su una TV/monitor.
+- I display **SPI** (collegati via GPIO, es. TFT 3.5" con driver `tft35a`) **non vengono gestiti**
+  dal sistema DRM: restano un framebuffer legacy `fbdev` (`/dev/fbN`).
 - Il vecchio software **`fbcp`** (Framebuffer Copy) **non è più supportato**: Broadcom ha rimosso
   le API hardware legacy (**Dispmanx**).
-- Risultato: all'avvio di EmulationStation si ottengono **schermate nere** o **blocchi**
-  (deadlock su LLVMpipe).
+- Risultato: avviando EmulationStation in modo nativo sul TFT si ottengono **schermate nere** o
+  **blocchi** (deadlock su LLVMpipe).
 
-**La soluzione:** installare un server **X11 minimale** (senza Desktop Environment) e obbligarlo
-a renderizzare direttamente sul framebuffer **`/dev/fb0`**.
+**La soluzione:** un server **X11 minimale** (senza Desktop Environment) che renderizza
+EmulationStation sul framebuffer del TFT (`fbdev`). E poiché l'HDMI funziona da solo, lo stesso
+script di avvio **rileva all'accensione se c'è un cavo HDMI collegato** e sceglie dove mandare
+EmulationStation:
+
+| All'accensione | Uscita usata |
+|---|---|
+| **HDMI collegato** | EmulationStation sulla **TV** (KMS/GPU) |
+| **Nessun HDMI** | EmulationStation sul **TFT SPI** (Ponte X11 `fbdev`) |
+
+> **Doppio schermo simultaneo — non supportato con `tft35a`.** Non è possibile avere
+> *contemporaneamente* ES sulla TV **e** un secondo output (es. un terminale) sul TFT con il driver
+> `tft35a`/`fbdev`: X enumera come schede video solo i device **DRM**, e il TFT fbtft non lo è,
+> quindi non può essere agganciato come secondo schermo accanto alla GPU HDMI. Per avere un
+> terminale mentre giochi in TV si usa **SSH** (vedi
+> [Aprire un terminale](#aprire-un-terminale-sullo-schermino)). Esiste una via "DRM" sperimentale
+> (`dtoverlay=piscreen,drm`, driver kernel `ili9486`) che la renderebbe possibile, ma richiede di
+> tarare l'init del pannello — vedi [Troubleshooting](#doppio-schermo-tv--tft-simultaneo).
 
 ---
 
@@ -52,33 +72,34 @@ a renderizzare direttamente sul framebuffer **`/dev/fb0`**.
 
 ---
 
-## Installazione: il "Ponte X11"
+## Installazione: il "Ponte X11" con auto-switch
 
 ### 1. Pacchetti X11 e legacy
 
 ```bash
-sudo apt install -y xorg xserver-xorg-video-fbdev xinit xserver-xorg-legacy
+sudo apt install -y xorg xserver-xorg-video-fbdev xinit xserver-xorg-legacy xterm
 ```
 
-### 2. Permessi e routing sul framebuffer
+### 2. Permessi X e file di configurazione del TFT
 
-Permetti l'avvio di X da console a un utente non-root:
+Permetti l'avvio di X e lascia che giri con i privilegi necessari a gestire il framebuffer:
 
 ```bash
 sudo sed -i 's/allowed_users=console/allowed_users=anybody/' /etc/X11/Xwrapper.config
-sudo sed -i 's/needs_root_rights=no/needs_root_rights=yes/' /etc/X11/Xwrapper.config
+grep -q '^needs_root_rights=' /etc/X11/Xwrapper.config \
+  && sudo sed -i 's/^needs_root_rights=.*/needs_root_rights=yes/' /etc/X11/Xwrapper.config \
+  || echo 'needs_root_rights=yes' | sudo tee -a /etc/X11/Xwrapper.config
 ```
 
-Forza X11 sul framebuffer locale, ignorando l'HDMI mancante:
+> X avviato **da root** accetta `-config` **solo con percorso relativo** dentro `/etc/X11/` (non
+> percorsi assoluti). Per questo il file di configurazione del TFT va creato lì.
+
+Crea il file di config del TFT in `/etc/X11/` e rendilo scrivibile dal tuo utente, così
+l'autostart può rigenerarlo a ogni avvio (il numero del framebuffer `/dev/fbN` può cambiare):
 
 ```bash
-sudo bash -c 'cat > /usr/share/X11/xorg.conf.d/99-fbdev.conf << EOF
-Section "Device"
-    Identifier "Schermo_SPI"
-    Driver "fbdev"
-    Option "fbdev" "/dev/fb0"
-EndSection
-EOF'
+sudo touch /etc/X11/spi.conf
+sudo chown noya:noya /etc/X11/spi.conf
 ```
 
 ### 3. Disabilitazione Display Manager e boot testuale
@@ -91,7 +112,7 @@ sudo systemctl disable lightdm
 sudo systemctl set-default multi-user.target
 ```
 
-### 4. Autostart (il "grilletto")
+### 4. Autostart con auto-switch TV/TFT
 
 Abilita il **Console Autologin**:
 
@@ -100,19 +121,63 @@ sudo raspi-config
 # System Options -> Boot / Auto Login -> Console Autologin
 ```
 
-Aggiungi l'avvio del server X nel profilo utente:
-
-```bash
-nano /home/noya/.bash_profile
-```
-
-In fondo al file inserisci:
+Aggiungi in fondo a `/home/noya/.bash_profile` la logica che, all'accensione, rileva l'HDMI e
+avvia EmulationStation sullo schermo giusto:
 
 ```bash
 if [ -z "$DISPLAY" ] && [ -n "$XDG_VTNR" ] && [ "$XDG_VTNR" -eq 1 ]; then
-  exec startx /usr/bin/emulationstation -- -nocursor
+
+    # Rileva il framebuffer del TFT SPI (fbtft) per nome: il numero /dev/fbN può cambiare
+    TFT_DEV="/dev/fb1"
+    for f in /sys/class/graphics/fb*; do
+        if grep -qs "fb_ili9486" "$f/name"; then
+            TFT_DEV="/dev/$(basename "$f")"
+        fi
+    done
+
+    # Config X "solo TFT" (fbdev), rigenerata a ogni avvio sul framebuffer corretto
+    cat > /etc/X11/spi.conf << EOF
+Section "ServerFlags"
+    Option "AutoAddGPU" "false"
+EndSection
+Section "Device"
+    Identifier "TFT_SPI"
+    Driver "fbdev"
+    Option "fbdev" "$TFT_DEV"
+EndSection
+Section "Screen"
+    Identifier "Screen_TFT"
+    Device "TFT_SPI"
+EndSection
+Section "ServerLayout"
+    Identifier "Solo_TFT"
+    Screen "Screen_TFT"
+EndSection
+EOF
+
+    HDMI_STATUS=$(cat /sys/class/drm/card*-HDMI-A-*/status 2>/dev/null | grep -m 1 "^connected")
+
+    if [ -n "$HDMI_STATUS" ]; then
+        # HDMI collegato: EmulationStation sulla TV (X usa automaticamente la GPU/KMS)
+        sed -i '/video_driver/d; /audio_driver/d' /opt/retropie/configs/all/retroarch.cfg
+        printf 'video_driver = "gl"\naudio_driver = "alsa"\n' >> /opt/retropie/configs/all/retroarch.cfg
+        exec startx /usr/bin/emulationstation -- -nocursor
+    else
+        # Nessun HDMI: EmulationStation sul TFT (Ponte X11 fbdev)
+        sed -i '/video_driver/d; /audio_driver/d' /opt/retropie/configs/all/retroarch.cfg
+        printf 'video_driver = "sdl2"\naudio_driver = "dummy"\n' >> /opt/retropie/configs/all/retroarch.cfg
+        exec startx /usr/bin/emulationstation -- -config spi.conf -nocursor
+    fi
 fi
 ```
+
+Come funziona:
+
+- **`fb_ili9486`** — individua il framebuffer del TFT anche se l'ordine `fb0`/`fb1` cambia tra un
+  avvio e l'altro (con l'HDMI collegato la GPU di solito prende `fb0` e il TFT `fb1`).
+- **HDMI collegato** — ES sulla TV con `video_driver = "gl"` e audio `alsa` (uscita HDMI).
+- **Nessun HDMI** — ES sul TFT con `video_driver = "sdl2"` (rendering software) e audio `dummy`,
+  che evita i crash di RetroArch dentro il Ponte X11.
 
 > **Nota:** rimuovi eventuali vecchi file di autostart in
 > `/opt/retropie/configs/all/autostart.sh`, altrimenti possono entrare in conflitto.
@@ -173,10 +238,17 @@ Dopo il trasferimento, **riavvia EmulationStation** dal menu principale per aggi
 
 ## Aprire un terminale sullo schermino
 
-Dato che EmulationStation gira **dentro X11** (`startx`), il modo più comodo per avere un
-terminale **direttamente sul display SPI** — senza passare per le console virtuali (`Alt+F2`,
-`Alt+F3`, ...) — è lanciare un emulatore di terminale **nella stessa sessione X**,
-comandabile da EmulationStation.
+Ci sono due situazioni:
+
+- **Mentre giochi sulla TV (HDMI collegato):** usa semplicemente **SSH** dal PC/telefono —
+  `ssh noya@retropi`. È il modo più pratico, e l'unico possibile col TFT che resta spento (il
+  doppio schermo simultaneo non è supportato, vedi
+  [il problema architetturale](#il-problema-architetturale)).
+- **Quando usi il Pi in portatile (ES sul TFT, niente HDMI):** apri un terminale **direttamente
+  sullo schermino** con il metodo qui sotto, senza passare per le console virtuali (`Alt+F2`...).
+
+Dato che EmulationStation gira **dentro X11** (`startx`), basta lanciare un emulatore di terminale
+**nella stessa sessione X**, comandabile da EmulationStation.
 
 ### Metodo consigliato: terminale come "Port"
 
@@ -218,7 +290,15 @@ richiede comunque la tastiera fisica e i tasti `Alt+F#`.
 
 ### Schermo nero o blocco all'avvio di EmulationStation
 Il display SPI non viene gestito dal driver DRM moderno. Verifica di aver completato il
-[Ponte X11](#installazione-il-ponte-x11): server X minimale + `99-fbdev.conf` puntato su `/dev/fb0`.
+[Ponte X11](#installazione-il-ponte-x11-con-auto-switch): server X minimale + `/etc/X11/spi.conf`
+puntato sul framebuffer giusto. Controlla quale `/dev/fbN` è il TFT con:
+
+```bash
+for f in /sys/class/graphics/fb*; do echo "$f -> $(cat $f/name 2>/dev/null)"; done
+```
+
+Il TFT è quello con nome **`fb_ili9486`**: se non è `/dev/fb1`, è proprio per questo che lo script
+di avvio lo rileva per nome invece di usare un numero fisso.
 
 ### RetroArch crasha all'avvio di un gioco (video/audio)
 Dentro il Ponte X11, RetroArch cerca accelerazione 3D hardware e scheda audio HDMI, andando in crash
@@ -245,4 +325,27 @@ LightDM non è stato disabilitato o esiste un vecchio autostart. Riesegui i pass
 
 ### Errore di permessi all'avvio di `startx`
 Controlla `/etc/X11/Xwrapper.config`: `allowed_users=anybody` e `needs_root_rights=yes`
-(vedi [passo 2](#2-permessi-e-routing-sul-framebuffer)).
+(vedi [passo 2](#2-permessi-x-e-file-di-configurazione-del-tft)). Se nel log di X
+(`/var/log/Xorg.0.log`) trovi `Invalid argument for -config ... must specify a relative path`,
+significa che stai passando un percorso **assoluto** a un X che gira da root: tieni `spi.conf`
+in `/etc/X11/` e richiamalo come `-config spi.conf` (relativo).
+
+### Doppio schermo TV + TFT simultaneo
+**Non supportato con il driver `tft35a`/`fbdev`.** Avviando un solo server X con due schermi
+(`modesetting` per l'HDMI + `fbdev` per il TFT), X carica `fbdev` ma poi lo **scarta**: enumera
+come schede video solo i device **DRM** (`/dev/dri/cardN`) e il TFT fbtft non lo è, quindi non
+viene agganciato come secondo schermo. Nel log compare `Falling back to old probe method for fbdev`
+seguito da `UnloadModule: "fbdev"`.
+
+Per il terminale mentre giochi sulla TV usa **SSH**. Se vuoi davvero ES sulla TV **e** un secondo
+output sul TFT in contemporanea, l'unica strada è rendere il TFT un device **DRM**:
+
+```ini
+# in /boot/firmware/config.txt, al posto di dtoverlay=tft35a,...
+dtoverlay=piscreen,drm,rotate=90,speed=16000000
+```
+
+Questo carica il driver kernel `ili9486` e fa comparire un `/dev/dri/card2` (`ili9486drmfb`),
+gestibile da `modesetting` come secondo schermo o tramite multiseat di `logind`. Attenzione: l'init
+del pannello va tarato (può restare **bianco** se i parametri non combaciano), e con questo display
+non è banale — per questo la configurazione di riferimento resta `tft35a` con l'auto-switch.

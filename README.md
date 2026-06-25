@@ -8,6 +8,9 @@ Su Pi 5 il driver grafico moderno (KMS/DRM) gestisce solo l'HDMI: questa guida s
 un **"Ponte X11"** minimale per renderizzare EmulationStation sul framebuffer del display SPI,
 oltre a configurare il bus SPI e risolvere i crash di RetroArch.
 
+La configurazione è **auto-commutante**: all'avvio il Pi rileva l'HDMI e manda EmulationStation
+sulla **TV** se collegata, altrimenti sul **TFT SPI**.
+
 ## Guida completa
 
 **[docs/README.md](docs/README.md)**
@@ -15,10 +18,11 @@ oltre a configurare il bus SPI e risolvere i crash di RetroArch.
 ## Contenuti
 
 - Il problema architetturale (KMS/DRM, Dispmanx, `fbcp`)
-- Installazione del Ponte X11
+- Installazione del Ponte X11 con auto-switch TV/TFT
 - Configurazione hardware del bus SPI (`tft35a`)
 - Trasferimento ROM e controlli
-- Troubleshooting (schermo nero, crash RetroArch, artefatti SPI, permessi)
+- Aprire un terminale sullo schermino (Port `xterm` / SSH)
+- Troubleshooting (schermo nero, crash RetroArch, doppio schermo, permessi)
 
 ## Licenza
 
