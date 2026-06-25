@@ -17,6 +17,7 @@ usando un **display TFT SPI da 3.5"** (controller `tft35a`) collegato via GPIO.
   - [4. Autostart (il "grilletto")](#4-autostart-il-grilletto)
 - [Configurazione hardware: bus SPI (`tft35a`)](#configurazione-hardware-bus-spi-tft35a)
 - [Utilizzo: ROM e controlli](#utilizzo-rom-e-controlli)
+- [Aprire un terminale sullo schermino](#aprire-un-terminale-sullo-schermino)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -167,6 +168,49 @@ Dopo il trasferimento, **riavvia EmulationStation** dal menu principale per aggi
 
 > **Mai scollegare brutalmente l'alimentazione** durante un blocco: rischi la corruzione
 > della partizione FAT32 di avvio.
+
+---
+
+## Aprire un terminale sullo schermino
+
+Dato che EmulationStation gira **dentro X11** (`startx`), il modo più comodo per avere un
+terminale **direttamente sul display SPI** — senza passare per le console virtuali (`Alt+F2`,
+`Alt+F3`, ...) — è lanciare un emulatore di terminale **nella stessa sessione X**,
+comandabile da EmulationStation.
+
+### Metodo consigliato: terminale come "Port"
+
+1. Installa `xterm` (leggerissimo, non richiede un Desktop Environment):
+
+   ```bash
+   sudo apt install -y xterm
+   ```
+
+2. Crea un launcher nella sezione **Ports** di RetroPie:
+
+   ```bash
+   cat > /home/noya/RetroPie/roms/ports/Terminal.sh << 'EOF'
+   #!/bin/bash
+   # Apre xterm a tutto schermo sul TFT; chiudendo la shell (exit) si torna a EmulationStation
+   xterm -fa "Monospace" -fs 14 -geometry 9999x9999+0+0 -e bash
+   EOF
+   chmod +x /home/noya/RetroPie/roms/ports/Terminal.sh
+   ```
+
+   > La `-geometry 9999x9999+0+0` viene ridimensionata automaticamente da xterm alla
+   > risoluzione reale del display: in pratica equivale a "tutto schermo".
+
+3. **Riavvia EmulationStation.** Nella sezione **Ports** comparirà la voce **Terminal**:
+   selezionandola con il controller o con `Invio` si apre il terminale sul TFT. Digiti i
+   comandi con una tastiera collegata e, una volta finito, con `exit` (o `Ctrl+D`) chiudi
+   la shell e torni alla lista giochi.
+
+### Alternativa da tastiera (console di emergenza)
+
+La guardia in `.bash_profile` lancia X **solo sulla VT1**. Premendo `Alt+F2` ottieni quindi
+una normale shell di login su un'altra console, che **non** riavvia EmulationStation; con
+`Alt+F1` torni al display di gioco. È il metodo "di emergenza", utile se X si blocca, ma
+richiede comunque la tastiera fisica e i tasti `Alt+F#`.
 
 ---
 
