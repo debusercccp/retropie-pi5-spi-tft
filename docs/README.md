@@ -41,14 +41,22 @@ Conseguenze:
   **blocchi** (deadlock su LLVMpipe).
 
 **La soluzione:** un server **X11 minimale** (senza Desktop Environment) che renderizza
-EmulationStation sul framebuffer del TFT (`fbdev`). E poiché l'HDMI funziona da solo, lo stesso
-script di avvio **rileva all'accensione se c'è un cavo HDMI collegato** e sceglie dove mandare
-EmulationStation:
+EmulationStation sul framebuffer del TFT (`fbdev`). Questo Ponte X11 serve **solo per il TFT**.
+Poiché l'HDMI funziona da solo, lo stesso script di avvio **rileva all'accensione se c'è un cavo
+HDMI collegato** e sceglie dove (e come) mandare EmulationStation:
 
-| All'accensione | Uscita usata |
+| All'accensione | Come parte EmulationStation |
 |---|---|
-| **HDMI collegato** | EmulationStation sulla **TV** (KMS/GPU) |
-| **Nessun HDMI** | EmulationStation sul **TFT SPI** (Ponte X11 `fbdev`) |
+| **HDMI collegato** | sulla **TV**, **diretto su KMS** (senza X) |
+| **Nessun HDMI** | sul **TFT SPI**, tramite **Ponte X11** (`fbdev`) |
+
+> **Perché sull'HDMI niente X.** Su Pi, il RetroArch di RetroPie è compilato **senza driver video
+> X11**: il suo unico contesto video è **KMS**, quindi all'avvio di un gioco vuole prendere il
+> controllo diretto del display. Se EmulationStation girasse dentro X sulla TV, X terrebbe occupato
+> il "master" DRM dell'HDMI e RetroArch fallirebbe il modeset (`[KMS]: Error when switching mode`),
+> uscendo subito: schermo nero di qualche secondo e ritorno a EmulationStation. Lanciando ES
+> **diretto su KMS** (come nel RetroPie standard), il display resta libero e i giochi partono.
+> Il Ponte X11 si usa solo sul TFT, dove non c'è KMS e RetroArch ripiega su `sdl2`.
 
 > **Doppio schermo simultaneo — non supportato con `tft35a`.** Non è possibile avere
 > *contemporaneamente* ES sulla TV **e** un secondo output (es. un terminale) sul TFT con il driver
@@ -127,43 +135,34 @@ avvia EmulationStation sullo schermo giusto:
 ```bash
 if [ -z "$DISPLAY" ] && [ -n "$XDG_VTNR" ] && [ "$XDG_VTNR" -eq 1 ]; then
 
-    # Rileva il framebuffer del TFT SPI (fbtft) per nome: il numero /dev/fbN può cambiare
-    TFT_DEV="/dev/fb1"
-    for f in /sys/class/graphics/fb*; do
-        if grep -qs "fb_ili9486" "$f/name"; then
-            TFT_DEV="/dev/$(basename "$f")"
-        fi
-    done
-
-    # Config X "solo TFT" (fbdev), rigenerata a ogni avvio sul framebuffer corretto
-    cat > /etc/X11/spi.conf << EOF
-Section "ServerFlags"
-    Option "AutoAddGPU" "false"
-EndSection
-Section "Device"
-    Identifier "TFT_SPI"
-    Driver "fbdev"
-    Option "fbdev" "$TFT_DEV"
-EndSection
-Section "Screen"
-    Identifier "Screen_TFT"
-    Device "TFT_SPI"
-EndSection
-Section "ServerLayout"
-    Identifier "Solo_TFT"
-    Screen "Screen_TFT"
-EndSection
-EOF
-
     HDMI_STATUS=$(cat /sys/class/drm/card*-HDMI-A-*/status 2>/dev/null | grep -m 1 "^connected")
 
     if [ -n "$HDMI_STATUS" ]; then
-        # HDMI collegato: EmulationStation sulla TV (X usa automaticamente la GPU/KMS)
+        # HDMI collegato: EmulationStation diretto su KMS (niente X).
+        # RetroArch su Pi usa solo il contesto video KMS e ha bisogno del
+        # display libero: dentro X non puo' disegnare (X11 driver assente).
         sed -i '/video_driver/d; /audio_driver/d' /opt/retropie/configs/all/retroarch.cfg
         printf 'video_driver = "gl"\naudio_driver = "alsa"\n' >> /opt/retropie/configs/all/retroarch.cfg
-        exec startx /usr/bin/emulationstation -- -nocursor
+        exec emulationstation
     else
-        # Nessun HDMI: EmulationStation sul TFT (Ponte X11 fbdev)
+        # Nessun HDMI: EmulationStation sul TFT SPI tramite Ponte X11 (fbdev).
+
+        # Rileva il framebuffer del TFT SPI (fbtft) per nome: il numero /dev/fbN può cambiare
+        TFT_DEV="/dev/fb1"
+        for f in /sys/class/graphics/fb*; do
+            if grep -qs "fb_ili9486" "$f/name"; then
+                TFT_DEV="/dev/$(basename "$f")"
+            fi
+        done
+
+        # Config X "solo TFT" (fbdev), rigenerata a ogni avvio sul framebuffer corretto
+        {
+            printf 'Section "ServerFlags"\n    Option "AutoAddGPU" "false"\nEndSection\n'
+            printf 'Section "Device"\n    Identifier "TFT_SPI"\n    Driver "fbdev"\n    Option "fbdev" "%s"\nEndSection\n' "$TFT_DEV"
+            printf 'Section "Screen"\n    Identifier "Screen_TFT"\n    Device "TFT_SPI"\nEndSection\n'
+            printf 'Section "ServerLayout"\n    Identifier "Solo_TFT"\n    Screen "Screen_TFT"\nEndSection\n'
+        } > /etc/X11/spi.conf
+
         sed -i '/video_driver/d; /audio_driver/d' /opt/retropie/configs/all/retroarch.cfg
         printf 'video_driver = "sdl2"\naudio_driver = "dummy"\n' >> /opt/retropie/configs/all/retroarch.cfg
         exec startx /usr/bin/emulationstation -- -config spi.conf -nocursor
@@ -173,11 +172,15 @@ fi
 
 Come funziona:
 
+- **HDMI collegato** — `exec emulationstation` lancia ES **diretto su KMS** (come nel RetroPie
+  standard), senza X: il display HDMI resta libero per RetroArch (`video_driver = "gl"`, audio
+  `alsa`). Avviarlo dentro X farebbe fallire il modeset KMS di RetroArch e i giochi non partirebbero.
+- **Nessun HDMI** — il Ponte X11 entra in gioco solo qui: ES sul TFT con `video_driver = "sdl2"`
+  (rendering software) e audio `dummy`, che evita i crash di RetroArch dentro X.
 - **`fb_ili9486`** — individua il framebuffer del TFT anche se l'ordine `fb0`/`fb1` cambia tra un
   avvio e l'altro (con l'HDMI collegato la GPU di solito prende `fb0` e il TFT `fb1`).
-- **HDMI collegato** — ES sulla TV con `video_driver = "gl"` e audio `alsa` (uscita HDMI).
-- **Nessun HDMI** — ES sul TFT con `video_driver = "sdl2"` (rendering software) e audio `dummy`,
-  che evita i crash di RetroArch dentro il Ponte X11.
+- **`spi.conf` con `printf`** — il file di config X viene generato riga per riga con `printf`
+  (niente heredoc), così è robusto anche se l'autostart viene incollato in un terminale.
 
 > **Nota:** rimuovi eventuali vecchi file di autostart in
 > `/opt/retropie/configs/all/autostart.sh`, altrimenti possono entrare in conflitto.
@@ -247,8 +250,9 @@ Ci sono due situazioni:
 - **Quando usi il Pi in portatile (ES sul TFT, niente HDMI):** apri un terminale **direttamente
   sullo schermino** con il metodo qui sotto, senza passare per le console virtuali (`Alt+F2`...).
 
-Dato che EmulationStation gira **dentro X11** (`startx`), basta lanciare un emulatore di terminale
-**nella stessa sessione X**, comandabile da EmulationStation.
+In modalità TFT EmulationStation gira **dentro X11** (`startx`), quindi basta lanciare un emulatore
+di terminale **nella stessa sessione X**, comandabile da EmulationStation. (Sulla TV invece ES gira
+diretto su KMS senza X: lì il terminale si ottiene via SSH, vedi sopra.)
 
 ### Metodo consigliato: terminale come "Port"
 
@@ -300,9 +304,35 @@ for f in /sys/class/graphics/fb*; do echo "$f -> $(cat $f/name 2>/dev/null)"; do
 Il TFT è quello con nome **`fb_ili9486`**: se non è `/dev/fb1`, è proprio per questo che lo script
 di avvio lo rileva per nome invece di usare un numero fisso.
 
-### RetroArch crasha all'avvio di un gioco (video/audio)
-Dentro il Ponte X11, RetroArch cerca accelerazione 3D hardware e scheda audio HDMI, andando in crash
-(**ALSA Error 524**, **Segmentation Fault**).
+### Sulla TV il gioco parte, schermo nero per qualche secondo e torna a EmulationStation
+RetroArch sta partendo ma muore subito. Lancialo a mano da SSH per vedere l'errore:
+
+```bash
+DISPLAY=:0 XAUTHORITY=/home/noya/.Xauthority \
+/opt/retropie/emulators/retroarch/bin/retroarch \
+  -L /opt/retropie/libretrocores/lr-mgba/mgba_libretro.so \
+  --config /opt/retropie/configs/gba/retroarch.cfg --verbose \
+  "/percorso/del/gioco.gba" 2>&1 | tail -30
+```
+
+Se nel log vedi:
+
+```
+[INFO] [GL]: Found GL context: "kms".
+[ERROR] [KMS]: Error when switching mode.
+[ERROR] [Video]: Cannot open threaded video driver.. Exiting..
+```
+
+allora EmulationStation sta girando **dentro X** sulla TV. Su Pi il RetroArch di RetroPie ha solo
+il contesto video **KMS** (nessun driver X11: verificalo con
+`retroarch --features | grep -E 'X11|KMS'`), quindi vuole prendere il display direttamente, ma X
+tiene occupato il master DRM dell'HDMI e il modeset fallisce. La soluzione **non** è cambiare il
+`video_driver`: è avviare ES **diretto su KMS** sulla TV (`exec emulationstation`, senza `startx`),
+come fa il [`.bash_profile` con auto-switch](#4-autostart-con-auto-switch-tvtft).
+
+### RetroArch crasha all'avvio di un gioco sul TFT (video/audio)
+Dentro il Ponte X11 (modalità TFT), RetroArch cerca accelerazione 3D hardware e scheda audio HDMI,
+andando in crash (**ALSA Error 524**, **Segmentation Fault**).
 
 Forza il rendering software e l'audio dummy nel config globale di RetroArch:
 
